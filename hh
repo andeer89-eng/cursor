@@ -7,15 +7,25 @@ from config import *
 from db import init_db, insert_token
 import pandas as pd
 
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "GMGN-Bot/1.0 (+https://example.com)",
+    "Accept": "application/json"
+})
+adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=3)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+REQUEST_TIMEOUT_SECONDS = 10
+
 def generate_analysis_urls(chain, contract_address):
     rugcheck_url = f"https://rugcheck.xyz/tokens/{chain}/{contract_address}"
     bubblemaps_url = f"https://app.bubblemaps.io/{chain}/token/{contract_address}"
     return rugcheck_url, bubblemaps_url
 
-def fetch_dexscreener_pairs():
+def fetch_dexscreener_pairs(session=session):
     try:
         url = "https://api.dexscreener.com/latest/dex/pairs"
-        response = requests.get(url)
+        response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.json().get("pairs", [])
     except Exception as e:
