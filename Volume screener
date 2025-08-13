@@ -1,6 +1,10 @@
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import requests_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+requests_cache.install_cache('yfinance_cache', expire_after=300)
 
 # List of S&P 500 tickers (partial list for demo; use a full list or API for complete coverage)
 sp500_tickers = [
@@ -19,6 +23,21 @@ def fetch_stock_data(ticker, days=LOOKBACK_DAYS + 1):
     start_date = end_date - timedelta(days=days)
     stock = yf.Ticker(ticker)
     df = stock.history(start=start_date, end=end_date)
+    return df
+
+
+def fetch_bulk_data(tickers, days=LOOKBACK_DAYS + 1):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    df = yf.download(
+        tickers=tickers,
+        start=start_date,
+        end=end_date,
+        group_by='ticker',
+        auto_adjust=False,
+        threads=True,
+        progress=False
+    )
     return df
 
 def screen_stock(ticker):
@@ -55,14 +74,57 @@ def screen_stock(ticker):
 
 def run_screener(tickers):
     """Run the screener across all tickers and return results."""
+    try:
+        df_bulk = fetch_bulk_data(tickers)
+    except Exception as e:
+        print(f"Bulk fetch failed, falling back to per-ticker: {e}")
+        df_bulk = None
+
     results = []
-    print("Scanning market for volume spike opportunities...")
-    for ticker in tickers:
-        result = screen_stock(ticker)
-        if result:
-            results.append(result)
-    
-    # Convert to DataFrame and sort by Volume Ratio
+
+    if isinstance(tickers, (list, tuple)) and df_bulk is not None and not df_bulk.empty:
+        for ticker in tickers:
+            try:
+                tdf = None
+                if isinstance(df_bulk.columns, pd.MultiIndex):
+                    if ticker in df_bulk.columns.get_level_values(0):
+                        tdf = df_bulk[ticker]
+                elif isinstance(df_bulk.columns, pd.Index) and 'Volume' in df_bulk.columns:
+                    # Single ticker may return a flat DataFrame without MultiIndex
+                    tdf = df_bulk
+
+                if tdf is None or tdf.empty or len(tdf) < LOOKBACK_DAYS:
+                    continue
+
+                current_volume = tdf['Volume'].iloc[-1]
+                avg_volume = tdf['Volume'].iloc[:-1].mean()
+
+                is_high_volume = current_volume >= VOLUME_THRESHOLD
+                is_unusual_volume = current_volume >= avg_volume * UNUSUAL_MULTIPLIER
+
+                if is_high_volume and is_unusual_volume:
+                    results.append({
+                        'Ticker': ticker,
+                        'Current Volume': int(current_volume),
+                        'Avg Volume (20d)': int(avg_volume),
+                        'Volume Ratio': round(current_volume / avg_volume, 2),
+                        'Price': round(tdf['Close'].iloc[-1], 2),
+                        'Price Change (%)': round(((tdf['Close'].iloc[-1] - tdf['Close'].iloc[-2]) / tdf['Close'].iloc[-2]) * 100, 2)
+                    })
+            except Exception:
+                continue
+    else:
+        print("Scanning market for volume spike opportunities...")
+        with ThreadPoolExecutor(max_workers=min(16, len(tickers))) as executor:
+            future_to_ticker = {executor.submit(screen_stock, ticker): ticker for ticker in tickers}
+            for future in as_completed(future_to_ticker):
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception:
+                    continue
+
     if results:
         df_results = pd.DataFrame(results)
         df_results = df_results.sort_values(by='Volume Ratio', ascending=False)
@@ -88,12 +150,4 @@ def main():
         print("No stocks found with significant volume spikes today.")
 
 if __name__ == "__main__":
-    # Install required library if not already installed
-    try:
-        import yfinance
-    except ImportError:
-        print("Installing yfinance...")
-        import os
-        os.system("pip install yfinance")
-    
     main()
