@@ -1,0 +1,14 @@
+# Core dependencies with performance optimizations
+yfinance>=0.2.18
+pandas>=2.0.0  # Improved performance with Arrow backend
+aiohttp>=3.8.5  # Async HTTP client with connection pooling
+numpy>=1.24.0  # Vectorized operations for faster calculations
+
+# Optional performance enhancements
+asyncio-throttle>=1.0.2  # Rate limiting for API calls
+aiodns>=3.0.0  # Faster DNS resolution
+cchardet>=2.1.7  # Faster character encoding detection
+
+# Development and monitoring (optional)
+memory-profiler>=0.60.0  # Memory usage profiling
+psutil>=5.9.0  # System resource monitoring
