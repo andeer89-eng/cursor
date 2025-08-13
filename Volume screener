@@ -1,0 +1,99 @@
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, timedelta
+
+# List of S&P 500 tickers (partial list for demo; use a full list or API for complete coverage)
+sp500_tickers = [
+    'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'NVDA', 'JPM', 'V', 'WMT',
+    'PG', 'KO', 'PEP', 'CSCO', 'INTC', 'AMD', 'QCOM', 'ORCL', 'IBM', 'DIS'
+]  # Add more or fetch dynamically from a source
+
+# Parameters
+VOLUME_THRESHOLD = 1000000  # Minimum daily volume
+UNUSUAL_MULTIPLIER = 2.0   # Volume must be 2x the 20-day average
+LOOKBACK_DAYS = 20         # Period for average volume calculation
+
+def fetch_stock_data(ticker, days=LOOKBACK_DAYS + 1):
+    """Fetch historical data for a given ticker."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    stock = yf.Ticker(ticker)
+    df = stock.history(start=start_date, end=end_date)
+    return df
+
+def screen_stock(ticker):
+    """Screen a single stock for volume spikes and unusual volume."""
+    try:
+        # Fetch data
+        df = fetch_stock_data(ticker)
+        if df.empty or len(df) < LOOKBACK_DAYS:
+            return None
+
+        # Current volume (latest day)
+        current_volume = df['Volume'].iloc[-1]
+        
+        # Average volume over lookback period (excluding today)
+        avg_volume = df['Volume'].iloc[:-1].mean()
+
+        # Check conditions
+        is_high_volume = current_volume >= VOLUME_THRESHOLD
+        is_unusual_volume = current_volume >= avg_volume * UNUSUAL_MULTIPLIER
+
+        if is_high_volume and is_unusual_volume:
+            return {
+                'Ticker': ticker,
+                'Current Volume': int(current_volume),
+                'Avg Volume (20d)': int(avg_volume),
+                'Volume Ratio': round(current_volume / avg_volume, 2),
+                'Price': round(df['Close'].iloc[-1], 2),
+                'Price Change (%)': round(((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100, 2)
+            }
+        return None
+    except Exception as e:
+        print(f"Error screening {ticker}: {e}")
+        return None
+
+def run_screener(tickers):
+    """Run the screener across all tickers and return results."""
+    results = []
+    print("Scanning market for volume spike opportunities...")
+    for ticker in tickers:
+        result = screen_stock(ticker)
+        if result:
+            results.append(result)
+    
+    # Convert to DataFrame and sort by Volume Ratio
+    if results:
+        df_results = pd.DataFrame(results)
+        df_results = df_results.sort_values(by='Volume Ratio', ascending=False)
+        return df_results
+    else:
+        return pd.DataFrame()  # Empty DataFrame if no matches
+
+def main():
+    # Run the screener
+    results = run_screener(sp500_tickers)
+
+    # Display results
+    if not results.empty:
+        print("\n=== Stocks with Volume Spikes and Unusual Activity ===")
+        print(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+        print(results.to_string(index=False))
+        print(f"\nFound {len(results)} opportunities.")
+        
+        # Save to CSV (optional)
+        results.to_csv('volume_spike_opportunities.csv', index=False)
+        print("Results saved to 'volume_spike_opportunities.csv'")
+    else:
+        print("No stocks found with significant volume spikes today.")
+
+if __name__ == "__main__":
+    # Install required library if not already installed
+    try:
+        import yfinance
+    except ImportError:
+        print("Installing yfinance...")
+        import os
+        os.system("pip install yfinance")
+    
+    main()
