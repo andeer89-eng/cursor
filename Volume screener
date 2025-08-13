@@ -1,6 +1,12 @@
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import asyncio
+import aiohttp
+import concurrent.futures
+from functools import lru_cache
+import time
+from typing import List, Dict, Optional
 
 # List of S&P 500 tickers (partial list for demo; use a full list or API for complete coverage)
 sp500_tickers = [
@@ -12,88 +18,223 @@ sp500_tickers = [
 VOLUME_THRESHOLD = 1000000  # Minimum daily volume
 UNUSUAL_MULTIPLIER = 2.0   # Volume must be 2x the 20-day average
 LOOKBACK_DAYS = 20         # Period for average volume calculation
+MAX_WORKERS = 10           # Maximum concurrent workers
+RETRY_ATTEMPTS = 3         # Number of retry attempts for failed requests
+CACHE_TTL = 300           # Cache time-to-live in seconds
 
-def fetch_stock_data(ticker, days=LOOKBACK_DAYS + 1):
-    """Fetch historical data for a given ticker."""
+# Global cache for stock data
+_data_cache = {}
+_cache_timestamps = {}
+
+def is_cache_valid(ticker: str) -> bool:
+    """Check if cached data is still valid."""
+    if ticker not in _cache_timestamps:
+        return False
+    return time.time() - _cache_timestamps[ticker] < CACHE_TTL
+
+@lru_cache(maxsize=128)
+def get_date_range(days: int = LOOKBACK_DAYS + 1):
+    """Cache date range calculation."""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-    stock = yf.Ticker(ticker)
-    df = stock.history(start=start_date, end=end_date)
-    return df
+    return start_date, end_date
 
-def screen_stock(ticker):
-    """Screen a single stock for volume spikes and unusual volume."""
+def fetch_stock_data_optimized(ticker: str, days: int = LOOKBACK_DAYS + 1) -> Optional[pd.DataFrame]:
+    """
+    Optimized stock data fetching with caching and error handling.
+    Returns only the necessary columns to reduce memory usage.
+    """
+    # Check cache first
+    if is_cache_valid(ticker) and ticker in _data_cache:
+        return _data_cache[ticker]
+    
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            start_date, end_date = get_date_range(days)
+            stock = yf.Ticker(ticker)
+            
+            # Only fetch necessary columns to reduce memory usage
+            df = stock.history(start=start_date, end=end_date, 
+                             actions=False, auto_adjust=False)
+            
+            if df.empty or len(df) < LOOKBACK_DAYS:
+                return None
+            
+            # Keep only necessary columns and convert to optimal dtypes
+            df = df[['Volume', 'Close']].copy()
+            df['Volume'] = df['Volume'].astype('int64')
+            df['Close'] = df['Close'].astype('float32')
+            
+            # Cache the result
+            _data_cache[ticker] = df
+            _cache_timestamps[ticker] = time.time()
+            
+            return df
+            
+        except Exception as e:
+            if attempt == RETRY_ATTEMPTS - 1:
+                print(f"Failed to fetch {ticker} after {RETRY_ATTEMPTS} attempts: {e}")
+                return None
+            time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+    
+    return None
+
+def calculate_volume_metrics(df: pd.DataFrame) -> tuple:
+    """
+    Optimized volume calculations using vectorized operations.
+    Returns (current_volume, avg_volume).
+    """
+    volumes = df['Volume'].values
+    current_volume = volumes[-1]
+    
+    # Use numpy operations for faster calculation
+    avg_volume = volumes[:-1].mean()
+    
+    return int(current_volume), int(avg_volume)
+
+def screen_stock_optimized(ticker: str) -> Optional[Dict]:
+    """Optimized stock screening with better memory usage and error handling."""
     try:
         # Fetch data
-        df = fetch_stock_data(ticker)
-        if df.empty or len(df) < LOOKBACK_DAYS:
+        df = fetch_stock_data_optimized(ticker)
+        if df is None:
             return None
 
-        # Current volume (latest day)
-        current_volume = df['Volume'].iloc[-1]
+        # Optimized volume calculations
+        current_volume, avg_volume = calculate_volume_metrics(df)
         
-        # Average volume over lookback period (excluding today)
-        avg_volume = df['Volume'].iloc[:-1].mean()
+        # Early exit if volume conditions not met
+        if current_volume < VOLUME_THRESHOLD:
+            return None
+        
+        if current_volume < avg_volume * UNUSUAL_MULTIPLIER:
+            return None
 
-        # Check conditions
-        is_high_volume = current_volume >= VOLUME_THRESHOLD
-        is_unusual_volume = current_volume >= avg_volume * UNUSUAL_MULTIPLIER
+        # Calculate price metrics only if volume conditions are met
+        prices = df['Close'].values
+        current_price = float(prices[-1])
+        prev_price = float(prices[-2])
+        price_change_pct = ((current_price - prev_price) / prev_price) * 100
 
-        if is_high_volume and is_unusual_volume:
-            return {
-                'Ticker': ticker,
-                'Current Volume': int(current_volume),
-                'Avg Volume (20d)': int(avg_volume),
-                'Volume Ratio': round(current_volume / avg_volume, 2),
-                'Price': round(df['Close'].iloc[-1], 2),
-                'Price Change (%)': round(((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100, 2)
-            }
-        return None
+        return {
+            'Ticker': ticker,
+            'Current Volume': current_volume,
+            'Avg Volume (20d)': avg_volume,
+            'Volume Ratio': round(current_volume / avg_volume, 2),
+            'Price': round(current_price, 2),
+            'Price Change (%)': round(price_change_pct, 2)
+        }
+        
     except Exception as e:
         print(f"Error screening {ticker}: {e}")
         return None
 
-def run_screener(tickers):
-    """Run the screener across all tickers and return results."""
+def run_screener_concurrent(tickers: List[str]) -> pd.DataFrame:
+    """
+    Run the screener concurrently across all tickers for improved performance.
+    Uses thread pool for I/O bound operations.
+    """
     results = []
-    print("Scanning market for volume spike opportunities...")
-    for ticker in tickers:
-        result = screen_stock(ticker)
-        if result:
-            results.append(result)
+    print(f"Scanning {len(tickers)} stocks concurrently with {MAX_WORKERS} workers...")
     
-    # Convert to DataFrame and sort by Volume Ratio
+    start_time = time.time()
+    
+    # Use ThreadPoolExecutor for I/O bound operations
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all tasks
+        future_to_ticker = {
+            executor.submit(screen_stock_optimized, ticker): ticker 
+            for ticker in tickers
+        }
+        
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                result = future.result(timeout=30)  # 30 second timeout per stock
+                if result:
+                    results.append(result)
+                    print(f"✓ {ticker}: Volume spike detected")
+            except concurrent.futures.TimeoutError:
+                print(f"✗ {ticker}: Timeout")
+            except Exception as e:
+                print(f"✗ {ticker}: Error - {e}")
+    
+    elapsed_time = time.time() - start_time
+    print(f"Scanning completed in {elapsed_time:.2f} seconds")
+    
+    # Convert to DataFrame and optimize memory usage
     if results:
         df_results = pd.DataFrame(results)
+        # Sort by Volume Ratio in descending order
         df_results = df_results.sort_values(by='Volume Ratio', ascending=False)
+        
+        # Optimize DataFrame memory usage
+        for col in ['Current Volume', 'Avg Volume (20d)']:
+            df_results[col] = df_results[col].astype('int64')
+        for col in ['Volume Ratio', 'Price', 'Price Change (%)']:
+            df_results[col] = df_results[col].astype('float32')
+            
         return df_results
     else:
-        return pd.DataFrame()  # Empty DataFrame if no matches
+        return pd.DataFrame()
+
+def clear_cache():
+    """Clear the data cache to free memory."""
+    global _data_cache, _cache_timestamps
+    _data_cache.clear()
+    _cache_timestamps.clear()
 
 def main():
-    # Run the screener
-    results = run_screener(sp500_tickers)
+    """Main function with performance monitoring."""
+    start_time = time.time()
+    
+    print("=== Optimized Volume Screener ===")
+    print(f"Scanning {len(sp500_tickers)} stocks...")
+    print(f"Cache TTL: {CACHE_TTL}s, Max Workers: {MAX_WORKERS}")
+    
+    # Run the optimized screener
+    results = run_screener_concurrent(sp500_tickers)
 
     # Display results
     if not results.empty:
         print("\n=== Stocks with Volume Spikes and Unusual Activity ===")
-        print(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
+        print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(results.to_string(index=False))
         print(f"\nFound {len(results)} opportunities.")
         
-        # Save to CSV (optional)
-        results.to_csv('volume_spike_opportunities.csv', index=False)
-        print("Results saved to 'volume_spike_opportunities.csv'")
+        # Save to CSV with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'volume_spike_opportunities_{timestamp}.csv'
+        results.to_csv(filename, index=False)
+        print(f"Results saved to '{filename}'")
+        
+        # Memory usage optimization
+        memory_usage = results.memory_usage(deep=True).sum() / 1024 / 1024
+        print(f"Results DataFrame memory usage: {memory_usage:.2f} MB")
+        
     else:
         print("No stocks found with significant volume spikes today.")
+    
+    total_time = time.time() - start_time
+    print(f"\nTotal execution time: {total_time:.2f} seconds")
+    print(f"Cache entries: {len(_data_cache)}")
+    
+    # Optional: Clear cache to free memory
+    if len(_data_cache) > 50:  # Clear cache if it gets too large
+        print("Clearing cache to free memory...")
+        clear_cache()
 
 if __name__ == "__main__":
-    # Install required library if not already installed
+    # Install required libraries if not already installed
     try:
         import yfinance
+        import aiohttp
     except ImportError:
-        print("Installing yfinance...")
+        print("Installing required packages...")
         import os
-        os.system("pip install yfinance")
+        os.system("pip install yfinance aiohttp")
+        print("Please restart the script after installation.")
+        exit(1)
     
     main()
