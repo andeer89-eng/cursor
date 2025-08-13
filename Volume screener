@@ -13,59 +13,76 @@ VOLUME_THRESHOLD = 1000000  # Minimum daily volume
 UNUSUAL_MULTIPLIER = 2.0   # Volume must be 2x the 20-day average
 LOOKBACK_DAYS = 20         # Period for average volume calculation
 
-def fetch_stock_data(ticker, days=LOOKBACK_DAYS + 1):
-    """Fetch historical data for a given ticker."""
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    stock = yf.Ticker(ticker)
-    df = stock.history(start=start_date, end=end_date)
+# New batched fetch function to minimize network calls and improve performance
+def fetch_stock_data_batch(tickers, days=LOOKBACK_DAYS + 1):
+    """Fetch historical data for a list of tickers in a single batched request."""
+    period_str = f"{days}d"
+    # Using yfinance.download allows retrieving multiple tickers at once and leverages multithreading internally
+    df = yf.download(
+        tickers=" ".join(tickers),
+        period=period_str,
+        group_by="ticker",
+        threads=True,
+        progress=False,
+    )
     return df
 
-def screen_stock(ticker):
-    """Screen a single stock for volume spikes and unusual volume."""
-    try:
-        # Fetch data
-        df = fetch_stock_data(ticker)
-        if df.empty or len(df) < LOOKBACK_DAYS:
-            return None
-
-        # Current volume (latest day)
-        current_volume = df['Volume'].iloc[-1]
-        
-        # Average volume over lookback period (excluding today)
-        avg_volume = df['Volume'].iloc[:-1].mean()
-
-        # Check conditions
-        is_high_volume = current_volume >= VOLUME_THRESHOLD
-        is_unusual_volume = current_volume >= avg_volume * UNUSUAL_MULTIPLIER
-
-        if is_high_volume and is_unusual_volume:
-            return {
-                'Ticker': ticker,
-                'Current Volume': int(current_volume),
-                'Avg Volume (20d)': int(avg_volume),
-                'Volume Ratio': round(current_volume / avg_volume, 2),
-                'Price': round(df['Close'].iloc[-1], 2),
-                'Price Change (%)': round(((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100, 2)
-            }
+def analyze_ticker(ticker, df):
+    """Analyze a single ticker's DataFrame for volume spikes."""
+    if df.empty or len(df) < LOOKBACK_DAYS:
         return None
-    except Exception as e:
-        print(f"Error screening {ticker}: {e}")
-        return None
+
+    # Current volume (latest day)
+    current_volume = df["Volume"].iloc[-1]
+
+    # Average volume over lookback period (excluding today)
+    avg_volume = df["Volume"].iloc[:-1].mean()
+
+    # Check conditions
+    is_high_volume = current_volume >= VOLUME_THRESHOLD
+    is_unusual_volume = current_volume >= avg_volume * UNUSUAL_MULTIPLIER
+
+    if is_high_volume and is_unusual_volume:
+        return {
+            "Ticker": ticker,
+            "Current Volume": int(current_volume),
+            "Avg Volume (20d)": int(avg_volume),
+            "Volume Ratio": round(current_volume / avg_volume, 2),
+            "Price": round(df["Close"].iloc[-1], 2),
+            "Price Change (%)": round(((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100, 2),
+        }
+    return None
 
 def run_screener(tickers):
     """Run the screener across all tickers and return results."""
     results = []
-    print("Scanning market for volume spike opportunities...")
+    print("Scanning market for volume spike opportunities (batched)...")
+
+    # Fetch data for all tickers in one call
+    batch_df = fetch_stock_data_batch(tickers)
+
     for ticker in tickers:
-        result = screen_stock(ticker)
-        if result:
-            results.append(result)
-    
+        try:
+            # Handle both single-ticker and multi-ticker DataFrame structures
+            if isinstance(batch_df.columns, pd.MultiIndex):
+                ticker_df = batch_df[ticker].dropna(how="all")
+            else:
+                ticker_df = batch_df.copy()
+
+            if ticker_df.empty:
+                continue
+
+            result = analyze_ticker(ticker, ticker_df)
+            if result:
+                results.append(result)
+        except KeyError:
+            # Ticker not found in batch_df
+            continue
+
     # Convert to DataFrame and sort by Volume Ratio
     if results:
         df_results = pd.DataFrame(results)
-        df_results = df_results.sort_values(by='Volume Ratio', ascending=False)
+        df_results = df_results.sort_values(by="Volume Ratio", ascending=False)
         return df_results
     else:
         return pd.DataFrame()  # Empty DataFrame if no matches
