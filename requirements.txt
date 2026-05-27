@@ -1,0 +1,36 @@
+# Core dependencies
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Performance monitoring
+psutil>=5.9.0
+
+# Data analysis and visualization
+yfinance>=0.2.18
+
+# Optional: For better performance with large datasets
+# numba>=0.57.0  # JIT compilation for numerical functions
+# cython>=3.0.0   # C extensions for Python
+
+# Optional: For async operations (if needed)
+# aiohttp>=3.8.0
+# asyncio-throttle>=1.0.0
+
+# Optional: For better database performance
+# sqlalchemy>=2.0.0  # If using SQLAlchemy instead of sqlite3
+# alembic>=1.11.0    # Database migrations
+
+# Optional: For caching
+# redis>=4.5.0       # Redis cache backend
+# cachetools>=5.3.0  # In-memory caching
+
+# Optional: For metrics and monitoring
+# prometheus-client>=0.17.0
+# grafana-api>=1.0.3
+
+# Development dependencies (optional)
+# pytest>=7.4.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.5.0
